@@ -10,7 +10,6 @@ from discord import ui, ButtonStyle, SelectOption
 # ============================================================
 # CONFIG — Variables d'environnement (.env / VPS)
 # ============================================================
-# Charge .env si présent (pip install python-dotenv)
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -22,25 +21,21 @@ PREFIX       = os.environ.get("PREFIX", "+")
 BUYER_ID     = int(os.environ.get("BUYER_ID", "0"))
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
-# asyncpg veut postgresql://, pas postgres://
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 if not TOKEN:
-    raise RuntimeError("❌ TOKEN manquant ! Définis la variable d'environnement TOKEN.")
+    raise RuntimeError("❌ TOKEN manquant !")
 if not BUYER_ID:
     print("⚠️ BUYER_ID non défini — aucune commande ne fonctionnera.")
 if not DATABASE_URL:
-    raise RuntimeError("❌ DATABASE_URL manquant ! Définis DATABASE_URL (postgresql://...).")
+    raise RuntimeError("❌ DATABASE_URL manquant !")
 
 # ============================================================
-# CACHE EN MÉMOIRE (rechargé depuis la DB au démarrage)
+# CACHE
 # ============================================================
 data = {"owners": [], "wl": []}
 
-# ============================================================
-# BOT
-# ============================================================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
@@ -79,7 +74,6 @@ class TeamBot(commands.Bot):
 
 
 bot = TeamBot()
-
 EMOJI_REGEX = re.compile(r"<(a?):([a-zA-Z0-9_]+):(\d+)>")
 EDITING_USERS = set()
 
@@ -346,16 +340,59 @@ class EmbedView(ui.View):
 
 
 # ============================================================
-# TICKETS — Catégories dynamiques stockées en DB
+# TICKETS — Catégories Team 17"
 # ============================================================
 import json as _json
 
 DEFAULT_CATEGORIES = [
-    {"emoji": "🆘", "label": "Support général",  "desc": "Besoin d'aide ou une question"},
-    {"emoji": "🐛", "label": "Signaler un bug",  "desc": "Quelque chose ne fonctionne pas"},
-    {"emoji": "🤝", "label": "Partenariat",      "desc": "Proposer une collaboration"},
-    {"emoji": "💡", "label": "Suggestion",        "desc": "Proposer une idée ou amélioration"},
-    {"emoji": "📩", "label": "Autre",             "desc": "Autre demande"},
+    {
+        "emoji": "🟢",
+        "label": "Rejoindre",
+        "desc": "Tu veux faire partie de la team",
+        "welcome": (
+            "__**Rejoindre la Team 17\"**__\n\n"
+            "Envoie un **screenshot de ton profil Palma** prouvant que :\n\n"
+            "› Tu as **`17\"`** après ton pseudo\n"
+            "› Tu as **`/palma`** dans ton statut\n\n"
+            "> *Patiente, un membre du staff va valider ta demande.*"
+        ),
+    },
+    {
+        "emoji": "🔴",
+        "label": "Quitter",
+        "desc": "Tu veux quitter la team",
+        "welcome": (
+            "__**Quitter la Team 17\"**__\n\n"
+            "Tu souhaites quitter la team ? Pas de soucis.\n\n"
+            "> *Explique-nous **brièvement** la raison de ton départ.*\n\n"
+            "Un membre du staff va passer pour finaliser."
+        ),
+    },
+    {
+        "emoji": "🟡",
+        "label": "Aide",
+        "desc": "Besoin d'aide ou d'une info",
+        "welcome": (
+            "__**Demande d'aide**__\n\n"
+            "Explique **clairement ton problème** ou ta question.\n\n"
+            "› Plus tu donnes de détails, plus on peut t'aider vite\n"
+            "› Joins des **captures d'écran** si nécessaire\n\n"
+            "> *Patiente, le staff arrive.*"
+        ),
+    },
+    {
+        "emoji": "⚠️",
+        "label": "Abus",
+        "desc": "Signaler un comportement abusif",
+        "welcome": (
+            "__**Signalement d'abus**__\n\n"
+            "Donne-nous un maximum d'infos pour qu'on puisse agir :\n\n"
+            "› **Pseudo** de la personne concernée\n"
+            "› **Ce qui s'est passé** (en détail)\n"
+            "› **Preuves** (screenshots, vidéos...)\n\n"
+            "> ⚠️ *Tout faux signalement sera sanctionné.*"
+        ),
+    },
 ]
 
 
@@ -375,9 +412,13 @@ async def save_ticket_categories(guild_id, categories):
     )
 
 
-async def create_ticket_channel(interaction, category_label, category_emoji):
+async def create_ticket_channel(interaction, category):
+    """category : dict complet {emoji, label, desc, welcome (optionnel)}"""
     guild = interaction.guild
     user = interaction.user
+    category_label = category["label"]
+    category_emoji = category.get("emoji", "📂")
+    welcome_text = category.get("welcome")
 
     existing = discord.utils.find(lambda c: c.topic and c.topic.startswith(f"ticket-{user.id}"), guild.text_channels)
     if existing:
@@ -398,23 +439,35 @@ async def create_ticket_channel(interaction, category_label, category_emoji):
         m = guild.get_member(uid)
         if m: overwrites[m] = discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True, attach_files=True, embed_links=True, read_message_history=True)
 
+    # Préfixe du salon selon catégorie
+    prefix = re.sub(r"[^a-z0-9]", "", category_label.lower())[:15] or "ticket"
+
     try:
         channel = await guild.create_text_channel(
-            name=f"ticket-{user.name}", category=disc_category,
+            name=f"{prefix}-{user.name}", category=disc_category,
             overwrites=overwrites, topic=f"ticket-{user.id}",
             reason=f"Ticket ({category_label}) par {user}")
     except discord.Forbidden:
         return await interaction.response.send_message("❌ Pas la permission de créer le salon.", ephemeral=True)
 
+    # Embed avec message d'accueil custom
     embed = discord.Embed(color=0x5865f2, timestamp=discord.utils.utcnow())
     embed.set_author(name=f"Ticket — {category_label}", icon_url=user.display_avatar.url)
-    embed.description = (
-        f"Salut {user.mention} ! 👋\n\n"
-        f"**Catégorie :** {category_emoji} {category_label}\n"
-        f"**Ouvert par :** {user.mention}\n\n"
-        f"Un membre du **staff** va te répondre rapidement.\n"
-        f"Décris ton problème en attendant."
-    )
+
+    if welcome_text:
+        embed.description = (
+            f"Salut {user.mention} ! 👋\n\n"
+            f"**Catégorie :** {category_emoji} {category_label}\n\n"
+            f"{welcome_text}"
+        )
+    else:
+        embed.description = (
+            f"Salut {user.mention} ! 👋\n\n"
+            f"**Catégorie :** {category_emoji} {category_label}\n\n"
+            f"Un membre du **staff** va te répondre rapidement.\n"
+            f"Décris ton problème en attendant."
+        )
+
     embed.set_footer(text=f"{user} • {user.id}")
     embed.set_thumbnail(url=user.display_avatar.url)
     await channel.send(content=f"{user.mention}", embed=embed, view=TicketControlView())
@@ -451,7 +504,7 @@ class TicketCategoryPickView(ui.View):
     def _make_cb(self, categories):
         async def callback(interaction):
             cat = categories[int(interaction.data["values"][0])]
-            await create_ticket_channel(interaction, cat["label"], cat.get("emoji", "📂"))
+            await create_ticket_channel(interaction, cat)
         return callback
 
 
@@ -504,17 +557,22 @@ class TicketConfirmCloseView(ui.View):
 
 
 # ============================================================
-# TICKET SETUP — Builder (panel + catégories personnalisables)
+# TICKET SETUP — Builder
 # ============================================================
 
 class TicketSetupSession:
     def __init__(self):
-        self.title = "🎫 Support — Ouvrir un ticket"
-        self.description = "Besoin d'aide ?\n\n**Clique sur le bouton** ci-dessous pour ouvrir un ticket privé avec le staff.\n\n> ⚠️ *N'ouvre pas de ticket pour rien.*"
-        self.color = 0x5865f2
+        self.title = "🎫 Ouvre un ticket !"
+        self.description = (
+            "Pour rejoindre la team, **ouvre un ticket** et envoie un *screenshot de ton profil Palma* prouvant que :\n\n"
+            "› Tu as **`17\"`** après ton pseudo\n"
+            "› Tu as **`/palma`** dans ton statut\n\n"
+            "> *Patiente, un membre du staff validera ta demande.*"
+        )
+        self.color = 0x2b2d31
         self.image = None
         self.thumbnail = None
-        self.footer = "Le staff te répondra dès que possible."
+        self.footer = "Team 17\" • Le staff te répondra dès que possible"
         self.categories = []
 
     def build(self):
@@ -527,7 +585,11 @@ class TicketSetupSession:
     def categories_text(self):
         if not self.categories:
             return "*Aucune catégorie — ajoute-en au moins une !*"
-        return "\n".join(f"`{i+1}.` {c.get('emoji','📂')} **{c['label']}** — {c.get('desc','')}" for i, c in enumerate(self.categories))
+        return "\n".join(
+            f"`{i+1}.` {c.get('emoji','📂')} **{c['label']}** — {c.get('desc','')}"
+            + ("  ✏️" if c.get("welcome") else "")
+            for i, c in enumerate(self.categories)
+        )
 
 
 TICKET_PROMPTS = {
@@ -591,6 +653,7 @@ class TicketSetupSelect(ui.Select):
             SelectOption(label="Image",                  value="image",       emoji="🖼️", description="Grande image"),
             SelectOption(label="Thumbnail",              value="thumbnail",   emoji="🌄", description="Petite image haut-droite"),
             SelectOption(label="Ajouter catégorie",      value="cat_add",     emoji="➕", description="Ajouter une raison au menu"),
+            SelectOption(label="Modifier message accueil", value="cat_msg",   emoji="✏️", description="Changer le message d'une catégorie"),
             SelectOption(label="Supprimer catégorie",    value="cat_del",     emoji="➖", description="Supprimer une raison"),
             SelectOption(label="Vider les catégories",   value="cat_clear",   emoji="🗑️", description="Tout supprimer"),
             SelectOption(label="Reset tout",             value="reset",       emoji="🔄", description="Réinitialiser le panel"),
@@ -616,7 +679,7 @@ class TicketSetupSelect(ui.Select):
         if choice == "cat_add":
             if len(view.session.categories) >= 25:
                 return await interaction.response.send_message("❌ Max 25 catégories.", ephemeral=True)
-            label, _ = await _wait_response(interaction, view, "➕ Nom de la catégorie", "Tape le **nom**.\n*Ex : `Support technique`*")
+            label, _ = await _wait_response(interaction, view, "➕ Nom de la catégorie", "Tape le **nom**.\n*Ex : `Rejoindre`*")
             if not label: return
             label = label[:100]
             desc = await _wait_simple(interaction.channel, interaction.user.id, view, "📄 Description courte", f"Description pour **{label}**.\n`rien` pour vide.")
@@ -625,7 +688,41 @@ class TicketSetupSelect(ui.Select):
             emoji_v = await _wait_simple(interaction.channel, interaction.user.id, view, "😀 Emoji", f"Emoji pour **{label}**.\n`rien` pour 📂")
             if not emoji_v or emoji_v.lower() in {"rien","none","vide"}: emoji_v = "📂"
             emoji_v = emoji_v[:30]
-            view.session.categories.append({"emoji": emoji_v, "label": label, "desc": desc})
+            welcome = await _wait_simple(
+                interaction.channel, interaction.user.id, view,
+                "💬 Message d'accueil",
+                f"Message affiché à l'ouverture du ticket pour **{label}**.\nMarkdown supporté.\n`rien` pour message par défaut."
+            )
+            if not welcome or welcome.lower() in {"rien","none","vide"}: welcome = None
+            view.session.categories.append({"emoji": emoji_v, "label": label, "desc": desc, "welcome": welcome})
+            try: await interaction.message.edit(embed=view.build_preview(), view=view)
+            except: pass
+            return
+
+        if choice == "cat_msg":
+            if not view.session.categories:
+                return await interaction.response.send_message("❌ Aucune catégorie.", ephemeral=True)
+            lst = "\n".join(f"`{i+1}.` {c.get('emoji','📂')} {c['label']}" for i, c in enumerate(view.session.categories))
+            content, _ = await _wait_response(interaction, view, "✏️ Modifier le message d'accueil", f"Tape le **numéro** de la catégorie :\n\n{lst}")
+            if not content: return
+            try:
+                idx = int(content) - 1
+                if not (0 <= idx < len(view.session.categories)):
+                    raise ValueError
+            except ValueError:
+                try: await interaction.channel.send("❌ Numéro invalide.", delete_after=4)
+                except: pass
+                return
+            cat = view.session.categories[idx]
+            welcome = await _wait_simple(
+                interaction.channel, interaction.user.id, view,
+                f"💬 Nouveau message pour {cat['label']}",
+                "Tape le nouveau message d'accueil (markdown supporté).\n`rien` pour réinitialiser par défaut."
+            )
+            if not welcome or welcome.lower() in {"rien","none","vide"}:
+                cat["welcome"] = None
+            else:
+                cat["welcome"] = welcome
             try: await interaction.message.edit(embed=view.build_preview(), view=view)
             except: pass
             return
@@ -713,6 +810,7 @@ class TicketSetupView(ui.View):
     def build_preview(self):
         e = self.session.build()
         e.add_field(name=f"📂 Catégories ({len(self.session.categories)})", value=self.session.categories_text(), inline=False)
+        e.add_field(name="\u200b", value="*✏️ = message d'accueil personnalisé*", inline=False)
         return e
 
     @ui.button(label="✅ Envoyer le panel", style=ButtonStyle.success, row=1)
@@ -799,7 +897,7 @@ async def create_emoji(ctx, *, args: str = None):
 
 
 # ============================================================
-# COMMANDES PERMISSIONS (améliorées)
+# PERMISSIONS
 # ============================================================
 @bot.command(name="setowner")
 async def setowner(ctx, member: discord.Member = None):
@@ -807,7 +905,7 @@ async def setowner(ctx, member: discord.Member = None):
     if not member:
         return await ctx.reply(embed=discord.Embed(
             title="❌ Argument manquant",
-            description=f"**Syntaxe :** `{PREFIX}setowner @membre`\n\nPromeut un membre au rang **Owner**.\nIl pourra gérer la whitelist, les tickets, les rôles et le dérank.",
+            description=f"**Syntaxe :** `{PREFIX}setowner @membre`\n\nPromeut un membre au rang **Owner**.",
             color=0xed4245
         ), mention_author=False)
     if member.id == BUYER_ID:
@@ -834,21 +932,14 @@ async def removeowner(ctx, member: discord.Member = None):
     if not member:
         return await ctx.reply(embed=discord.Embed(
             title="❌ Argument manquant",
-            description=f"**Syntaxe :** `{PREFIX}removeowner @membre`\n\nRetire le rang **Owner** à un membre.",
+            description=f"**Syntaxe :** `{PREFIX}removeowner @membre`",
             color=0xed4245
         ), mention_author=False)
     if member.id not in data["owners"]:
         return await ctx.reply("❌ Pas owner.", mention_author=False)
     await db_remove_staff(member.id)
     e = discord.Embed(title="❌ Owner retiré", color=0xed4245, timestamp=discord.utils.utcnow())
-    e.description = (
-        f"{member.mention} n'est plus **Owner**.\n\n"
-        f"**Permissions révoquées :**\n"
-        f"🔒 Gestion whitelist\n"
-        f"🔒 Setup tickets\n"
-        f"🔒 Dérank\n"
-        f"🔒 Toutes les commandes staff"
-    )
+    e.description = f"{member.mention} n'est plus **Owner**.\nToutes ses permissions admin ont été révoquées."
     e.set_thumbnail(url=member.display_avatar.url)
     e.set_footer(text=f"Par {ctx.author.display_name}")
     await ctx.reply(embed=e, mention_author=False)
@@ -859,7 +950,7 @@ async def setwl(ctx, member: discord.Member = None):
     if not member:
         return await ctx.reply(embed=discord.Embed(
             title="❌ Argument manquant",
-            description=f"**Syntaxe :** `{PREFIX}setwl @membre`\n\nAjoute un membre à la **Whitelist**.\nIl pourra utiliser toutes les commandes de base du bot.",
+            description=f"**Syntaxe :** `{PREFIX}setwl @membre`",
             color=0xed4245
         ), mention_author=False)
     if member.id == BUYER_ID or member.id in data["owners"]:
@@ -874,7 +965,6 @@ async def setwl(ctx, member: discord.Member = None):
         f"✅ Constructeur d'embed (`{PREFIX}embed`)\n"
         f"✅ Cloner des emojis (`{PREFIX}create`)\n"
         f"✅ Gérer les rôles (`{PREFIX}addrole` / `{PREFIX}delrole`)\n"
-        f"✅ Ajouter/retirer dans les tickets\n"
         f"✅ Voir le staff (`{PREFIX}staff`)"
     )
     e.set_thumbnail(url=member.display_avatar.url)
@@ -887,20 +977,19 @@ async def removewl(ctx, member: discord.Member = None):
     if not member:
         return await ctx.reply(embed=discord.Embed(
             title="❌ Argument manquant",
-            description=f"**Syntaxe :** `{PREFIX}removewl @membre`\n\nRetire un membre de la **Whitelist**.",
+            description=f"**Syntaxe :** `{PREFIX}removewl @membre`",
             color=0xed4245
         ), mention_author=False)
     if member.id not in data["wl"]:
         return await ctx.reply("❌ Pas whitelist.", mention_author=False)
     await db_remove_staff(member.id)
     e = discord.Embed(title="❌ Whitelist retiré", color=0xe67e22, timestamp=discord.utils.utcnow())
-    e.description = f"{member.mention} n'a plus accès aux commandes du bot.\nToutes ses permissions ont été révoquées."
+    e.description = f"{member.mention} n'a plus accès aux commandes du bot."
     e.set_thumbnail(url=member.display_avatar.url)
     e.set_footer(text=f"Par {ctx.author.display_name}")
     await ctx.reply(embed=e, mention_author=False)
 
 
-# ===== STAFF LIST =====
 @bot.command(name="staff", aliases=["perms", "team"])
 async def staff(ctx):
     e = discord.Embed(title="👑 Équipe du bot", color=0xffd700, timestamp=discord.utils.utcnow())
@@ -922,9 +1011,8 @@ async def staff(ctx):
 async def ticket_setup(ctx, channel: discord.TextChannel = None):
     if not is_owner(ctx.author.id): return
     view = TicketSetupView(ctx.author.id, ctx.guild.id)
-    # Charger les catégories existantes depuis la DB
     existing_cats = await get_ticket_categories(ctx.guild.id)
-    if existing_cats and existing_cats != DEFAULT_CATEGORIES:
+    if existing_cats:
         view.session.categories = list(existing_cats)
     await ctx.reply(
         content=f"**🛠️ Setup du panel tickets** — {ctx.author.mention}",
@@ -954,7 +1042,7 @@ async def ticket_add(ctx, member: discord.Member = None):
     if not (ctx.channel.topic or "").startswith("ticket-"): return
     if not is_wl(ctx.author.id): return
     if not member:
-        return await ctx.reply(f"❌ `{PREFIX}add @membre` — Ajouter quelqu'un au ticket.", mention_author=False)
+        return await ctx.reply(f"❌ `{PREFIX}add @membre`", mention_author=False)
     await ctx.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
     await ctx.reply(f"✅ {member.mention} ajouté au ticket.", mention_author=False)
 
@@ -963,7 +1051,7 @@ async def ticket_remove(ctx, member: discord.Member = None):
     if not (ctx.channel.topic or "").startswith("ticket-"): return
     if not is_wl(ctx.author.id): return
     if not member:
-        return await ctx.reply(f"❌ `{PREFIX}remove @membre` — Retirer quelqu'un du ticket.", mention_author=False)
+        return await ctx.reply(f"❌ `{PREFIX}remove @membre`", mention_author=False)
     await ctx.channel.set_permissions(member, overwrite=None)
     await ctx.reply(f"✅ {member.mention} retiré du ticket.", mention_author=False)
 
@@ -974,7 +1062,7 @@ async def addrole_cmd(ctx, member: discord.Member = None, *, role: discord.Role 
     if not ctx.guild.me.guild_permissions.manage_roles:
         return await ctx.reply("❌ Perm **Gérer les rôles** manquante.", mention_author=False, delete_after=5)
     if not member or not role:
-        return await ctx.reply(f"❌ Usage : `{PREFIX}addrole @membre @rôle` (ou IDs)", mention_author=False)
+        return await ctx.reply(f"❌ Usage : `{PREFIX}addrole @membre @rôle`", mention_author=False)
     if member.id == BUYER_ID: return await ctx.reply("❌ Pas touche au **Buyer**.", mention_author=False, delete_after=5)
     if role.is_default(): return await ctx.reply("❌ Impossible avec `@everyone`.", mention_author=False, delete_after=5)
     if role.managed: return await ctx.reply("❌ Rôle géré par une intégration.", mention_author=False, delete_after=5)
@@ -996,7 +1084,7 @@ async def delrole_cmd(ctx, member: discord.Member = None, *, role: discord.Role 
     if not ctx.guild.me.guild_permissions.manage_roles:
         return await ctx.reply("❌ Perm **Gérer les rôles** manquante.", mention_author=False, delete_after=5)
     if not member or not role:
-        return await ctx.reply(f"❌ Usage : `{PREFIX}delrole @membre @rôle` (ou IDs)", mention_author=False)
+        return await ctx.reply(f"❌ Usage : `{PREFIX}delrole @membre @rôle`", mention_author=False)
     if member.id == BUYER_ID: return await ctx.reply("❌ Pas touche au **Buyer**.", mention_author=False, delete_after=5)
     if role.is_default(): return await ctx.reply("❌ Impossible avec `@everyone`.", mention_author=False, delete_after=5)
     if role.managed: return await ctx.reply("❌ Rôle géré par une intégration.", mention_author=False, delete_after=5)
@@ -1021,7 +1109,7 @@ async def derank_cmd(ctx, member: discord.Member = None):
     if not member:
         return await ctx.reply(embed=discord.Embed(
             title="❌ Argument manquant",
-            description=f"**Syntaxe :** `{PREFIX}derank @membre`\n\nRetire **tous** les rôles d'un membre d'un coup.\nNe touche pas aux rôles gérés par des intégrations.",
+            description=f"**Syntaxe :** `{PREFIX}derank @membre`",
             color=0xed4245
         ), mention_author=False)
     if member.id == BUYER_ID: return await ctx.reply("❌ Pas touche au **Buyer**.", mention_author=False, delete_after=5)
@@ -1057,46 +1145,30 @@ ADMIN_PAGES = {
             f"*Gérer qui a accès au bot.*\n\n"
             f"💎 **`{PREFIX}setowner @membre`** — Promouvoir en Owner\n"
             f">>> Rang requis : **Buyer**\n"
-            f"Donne les permissions admin (whitelist, tickets, dérank).\n"
-            f"Si le membre était en whitelist, il passe automatiquement Owner.\n"
-            f"*Ex : `{PREFIX}setowner @Michel`*\n\n"
+            f"Donne les permissions admin (whitelist, tickets, dérank).\n\n"
             f"💎 **`{PREFIX}removeowner @membre`** — Retirer Owner\n"
-            f">>> Rang requis : **Buyer**\n"
-            f"Révoque toutes les permissions Owner.\n"
-            f"Le membre perd l'accès au bot entièrement.\n"
-            f"*Ex : `{PREFIX}removeowner @Michel`*\n\n"
+            f">>> Rang requis : **Buyer**\n\n"
             f"👑 **`{PREFIX}setwl @membre`** — Ajouter à la whitelist\n"
-            f">>> Rang requis : **Owner+**\n"
-            f"Donne accès à toutes les commandes de base (embed, emojis, rôles, tickets).\n"
-            f"*Ex : `{PREFIX}setwl @NouveauMembre`*\n\n"
+            f">>> Rang requis : **Owner+**\n\n"
             f"👑 **`{PREFIX}removewl @membre`** — Retirer de la whitelist\n"
-            f">>> Rang requis : **Owner+**\n"
-            f"Le membre perd l'accès au bot.\n"
-            f"*Ex : `{PREFIX}removewl @Membre`*"
+            f">>> Rang requis : **Owner+**"
         )
     },
     "tickets": {
         "emoji": "🎫", "title": "Système de Tickets", "color": 0x5865f2,
         "content": (
-            f"*Système de support avec catégories.*\n\n"
+            f"*Système de support avec catégories Team 17\".*\n\n"
             f"👑 **`{PREFIX}ticketsetup`** — Créer un panel de tickets\n"
             f">>> Rang requis : **Owner+**\n"
-            f"Ouvre un **constructeur interactif** pour personnaliser le panel (titre, description, couleur, image...).\n"
-            f"Le panel envoyé contient un **menu déroulant** avec 5 catégories :\n"
-            f"🆘 Support général • 🐛 Bug • 🤝 Partenariat • 💡 Suggestion • 📩 Autre\n\n"
-            f"⭐ **`{PREFIX}close`** — Fermer un ticket\n"
-            f">>> Rang requis : **Whitelist+** *(ou créateur du ticket)*\n"
-            f"Supprime le salon après 5 secondes.\n"
-            f"Un bouton 🔒 est aussi disponible dans chaque ticket.\n\n"
-            f"⭐ **`{PREFIX}add @membre`** — Ajouter au ticket\n"
-            f">>> Rang requis : **Whitelist+**\n"
-            f"Donne accès au ticket à un membre extérieur.\n\n"
-            f"⭐ **`{PREFIX}remove @membre`** — Retirer du ticket\n"
-            f">>> Rang requis : **Whitelist+**\n"
-            f"Retire l'accès au ticket.\n\n"
+            f"Constructeur interactif avec menu déroulant.\n"
+            f"Catégories par défaut :\n"
+            f"🟢 Rejoindre • 🔴 Quitter • 🟡 Aide • ⚠️ Abus\n\n"
+            f"Chaque catégorie peut avoir son **propre message d'accueil**.\n\n"
+            f"⭐ **`{PREFIX}close`** — Fermer un ticket *(WL+ ou créateur)*\n"
+            f"⭐ **`{PREFIX}add @membre`** — Ajouter au ticket *(WL+)*\n"
+            f"⭐ **`{PREFIX}remove @membre`** — Retirer du ticket *(WL+)*\n\n"
             f"**Dans chaque ticket :**\n"
-            f"🔒 **Fermer** — Ferme et supprime le ticket\n"
-            f"✋ **Prendre en charge** — Un staff claim le ticket"
+            f"🔒 **Fermer** • ✋ **Prendre en charge**"
         )
     },
     "roles": {
@@ -1104,67 +1176,25 @@ ADMIN_PAGES = {
         "content": (
             f"*Ajouter, retirer ou purger les rôles.*\n\n"
             f"⭐ **`{PREFIX}addrole @membre @rôle`** — Donner un rôle\n"
-            f">>> Rang requis : **Whitelist+**\n"
-            f"Ajoute le rôle au membre. Le rôle doit être en-dessous du tien et du bot.\n"
-            f"Le **Buyer** peut ignorer la restriction de hiérarchie.\n"
-            f"Alias : `{PREFIX}giverole`, `{PREFIX}ar`\n"
-            f"*Ex : `{PREFIX}addrole @Joueur @VIP`*\n\n"
             f"⭐ **`{PREFIX}delrole @membre @rôle`** — Retirer un rôle\n"
-            f">>> Rang requis : **Whitelist+**\n"
-            f"Retire le rôle du membre. Mêmes restrictions de hiérarchie.\n"
-            f"Alias : `{PREFIX}removerole`, `{PREFIX}dr`\n"
-            f"*Ex : `{PREFIX}delrole @Joueur @VIP`*\n\n"
-            f"👑 **`{PREFIX}derank @membre`** — Retirer TOUS les rôles\n"
-            f">>> Rang requis : **Owner+**\n"
-            f"Retire d'un coup tous les rôles du membre (sauf rôles d'intégration et ceux au-dessus du bot).\n"
-            f"⚠️ **Action radicale** — impossible sur le Buyer ou soi-même.\n"
-            f"Alias : `{PREFIX}stripall`, `{PREFIX}wipe`\n"
-            f"*Ex : `{PREFIX}derank @Tricheur`*"
+            f"👑 **`{PREFIX}derank @membre`** — Retirer **tous** les rôles *(Owner+)*"
         )
     },
     "utils": {
         "emoji": "🛠️", "title": "Utilitaires", "color": 0x3498db,
         "content": (
-            f"*Outils disponibles pour tous les membres staff.*\n\n"
-            f"⭐ **`{PREFIX}embed`** — Constructeur d'embed\n"
-            f">>> Rang requis : **Whitelist+**\n"
-            f"Ouvre un éditeur interactif pour créer un embed personnalisé.\n"
-            f"Tu peux modifier : titre, description, couleur, auteur, footer, image, thumbnail, URL, timestamp.\n"
-            f"Une fois terminé, choisis le salon de destination.\n"
-            f"⏱️ Timeout : 15 min (3 min par modification).\n\n"
+            f"⭐ **`{PREFIX}embed`** — Constructeur d'embed interactif\n"
             f"⭐ **`{PREFIX}create <emojis>`** — Cloner des emojis\n"
-            f">>> Rang requis : **Whitelist+** + perm Discord *Gérer les emojis*\n"
-            f"Copie un ou plusieurs emojis d'autres serveurs vers le tien.\n"
-            f"Tu peux renommer l'emoji en ajoutant le nom après (si un seul emoji).\n"
-            f"Alias : `{PREFIX}steal`, `{PREFIX}addemoji`\n"
-            f"*Ex : `{PREFIX}create :pepe: nouveauNom`*\n"
-            f"*Ex : `{PREFIX}create :emoji1: :emoji2: :emoji3:`*\n\n"
-            f"⭐ **`{PREFIX}staff`** — Voir l'équipe\n"
-            f">>> Rang requis : **Whitelist+**\n"
-            f"Affiche le Buyer, les Owners et la Whitelist.\n"
-            f"Alias : `{PREFIX}perms`, `{PREFIX}team`"
+            f"⭐ **`{PREFIX}staff`** — Voir l'équipe (Buyer/Owners/WL)"
         )
     },
     "hierarchy": {
         "emoji": "📊", "title": "Hiérarchie des Rangs", "color": 0x9b59b6,
         "content": (
-            f"*Structure des permissions du bot.*\n\n"
             f"**💎 Buyer** — Contrôle total\n"
-            f"C'est le propriétaire du bot (un seul, défini par `BUYER_ID`).\n"
-            f"Il peut tout faire et ne peut pas être ciblé par les commandes.\n\n"
-            f"**👑 Owner** — Administration\n"
-            f"Promu par le Buyer via `{PREFIX}setowner`.\n"
-            f"Commandes exclusives : `setwl`, `removewl`, `ticketsetup`, `derank`.\n"
-            f"+ toutes les commandes Whitelist.\n\n"
-            f"**⭐ Whitelist** — Accès au bot\n"
-            f"Ajouté par un Owner via `{PREFIX}setwl`.\n"
-            f"Commandes : `embed`, `create`, `addrole`, `delrole`, `add`, `remove`, `staff`, `help`.\n\n"
-            f"**🔒 Aucun rang** — Pas d'accès\n"
-            f"Sans rang, aucune commande ne fonctionne.\n"
-            f"Le bot ignore complètement les messages.\n\n"
-            f"**Comment monter en rang ?**\n"
-            f"🔒 → ⭐ : un **Owner** t'ajoute en whitelist\n"
-            f"⭐ → 👑 : le **Buyer** te promeut Owner"
+            f"**👑 Owner** — Admin (promu par le Buyer)\n"
+            f"**⭐ Whitelist** — Accès bot (ajouté par un Owner)\n"
+            f"**🔒 Aucun rang** — Pas d'accès, commandes ignorées"
         )
     },
 }
@@ -1173,8 +1203,7 @@ ADMIN_PAGES = {
 class AdminSelect(ui.Select):
     def __init__(self):
         opts = [
-            SelectOption(label=d["title"][:25], value=k, emoji=d["emoji"],
-                         description={"perms": "Owner, WL, promotions", "tickets": "Setup, close, add, remove", "roles": "Addrole, delrole, derank", "utils": "Embed, emoji, staff", "hierarchy": "Buyer > Owner > WL"}.get(k, "")[:50])
+            SelectOption(label=d["title"][:25], value=k, emoji=d["emoji"])
             for k, d in ADMIN_PAGES.items()
         ]
         super().__init__(placeholder="📂 Choisis une catégorie...", options=opts)
@@ -1191,10 +1220,9 @@ async def admin_cmd(ctx):
     rank = get_rank(ctx.author.id)
     e = discord.Embed(title="⚙️ Panneau d'Administration", color=0x5865f2, timestamp=discord.utils.utcnow())
     e.description = f"*Toutes les commandes admin expliquées en détail.*\n\n**Ton rang :** {rank}"
-    e.add_field(name="💎 Buyer", value=f"`setowner` `removeowner`\n+ tout le reste", inline=True)
+    e.add_field(name="💎 Buyer", value=f"`setowner` `removeowner`", inline=True)
     e.add_field(name="👑 Owner+", value=f"`setwl` `removewl`\n`ticketsetup` `derank`", inline=True)
     e.add_field(name="⭐ Whitelist+", value=f"`embed` `create` `addrole`\n`delrole` `staff` `help`", inline=True)
-    e.add_field(name="\u200b", value="*Sélectionne une catégorie ci-dessous pour les explications détaillées.*", inline=False)
     e.set_footer(text=f"Rang : {get_rank_short(ctx.author.id)}")
     view = ui.View(timeout=180); view.add_item(AdminSelect())
     await ctx.reply(embed=e, view=view, mention_author=False)
@@ -1207,17 +1235,17 @@ async def admin_cmd(ctx):
 async def help_cmd(ctx):
     rank = get_rank(ctx.author.id)
     e = discord.Embed(title="📖 Liste des commandes", color=0x5865f2, timestamp=discord.utils.utcnow())
-    e.description = f"Préfixe : `{PREFIX}` • Ton rang : **{rank}**\n\n💡 *Utilise `{PREFIX}admin` pour le détail de chaque commande.*"
+    e.description = f"Préfixe : `{PREFIX}` • Ton rang : **{rank}**\n\n💡 *Utilise `{PREFIX}admin` pour le détail.*"
     e.add_field(name="🛠️ Utilitaires",
-                value=f"`{PREFIX}embed` — Constructeur d'embed\n`{PREFIX}create <:e:id>` — Cloner emoji(s)\n`{PREFIX}staff` — Voir l'équipe\n`{PREFIX}help` — Cette aide\n`{PREFIX}admin` — Panneau admin détaillé", inline=False)
+                value=f"`{PREFIX}embed` `{PREFIX}create` `{PREFIX}staff` `{PREFIX}admin`", inline=False)
     e.add_field(name="🎫 Tickets",
-                value=f"`{PREFIX}ticketsetup` — Créer un panel *(Owner+)*\n`{PREFIX}close` — Fermer un ticket\n`{PREFIX}add @m` — Ajouter *(WL+)*\n`{PREFIX}remove @m` — Retirer *(WL+)*", inline=False)
+                value=f"`{PREFIX}ticketsetup` *(Owner+)*\n`{PREFIX}close` `{PREFIX}add` `{PREFIX}remove`", inline=False)
     e.add_field(name="🎭 Rôles",
-                value=f"`{PREFIX}addrole @m @r` — Donner un rôle\n`{PREFIX}delrole @m @r` — Retirer un rôle\n`{PREFIX}derank @m` — Tout retirer *(Owner+)*", inline=False)
+                value=f"`{PREFIX}addrole` `{PREFIX}delrole` `{PREFIX}derank` *(Owner+)*", inline=False)
     if is_owner(ctx.author.id):
-        e.add_field(name="👑 Owner", value=f"`{PREFIX}setwl @m` — Ajouter whitelist\n`{PREFIX}removewl @m` — Retirer whitelist", inline=False)
+        e.add_field(name="👑 Owner", value=f"`{PREFIX}setwl` `{PREFIX}removewl`", inline=False)
     if is_buyer(ctx.author.id):
-        e.add_field(name="💎 Buyer", value=f"`{PREFIX}setowner @m` — Promouvoir Owner\n`{PREFIX}removeowner @m` — Retirer Owner", inline=False)
+        e.add_field(name="💎 Buyer", value=f"`{PREFIX}setowner` `{PREFIX}removeowner`", inline=False)
     e.set_footer(text="Bot Team 17\"")
     await ctx.reply(embed=e, mention_author=False)
 
@@ -1234,23 +1262,23 @@ async def on_message(message):
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CheckFailure):
-        return  # Pas de perm → ignoré silencieusement
+        return
     if isinstance(error, commands.CommandNotFound):
         return
     if isinstance(error, commands.MissingRequiredArgument):
         await ctx.reply(embed=discord.Embed(
-            description=f"❌ Argument manquant : `{error.param.name}`\n\nTape `{PREFIX}help` ou `{PREFIX}admin` pour l'aide.",
+            description=f"❌ Argument manquant : `{error.param.name}`\n\nTape `{PREFIX}help` ou `{PREFIX}admin`.",
             color=0xed4245
         ), mention_author=False, delete_after=10)
         return
     if isinstance(error, commands.MemberNotFound):
-        await ctx.reply("❌ Membre introuvable. Mentionne-le ou utilise son ID.", mention_author=False, delete_after=5)
+        await ctx.reply("❌ Membre introuvable.", mention_author=False, delete_after=5)
         return
     if isinstance(error, commands.RoleNotFound):
-        await ctx.reply("❌ Rôle introuvable. Mentionne-le ou utilise son ID.", mention_author=False, delete_after=5)
+        await ctx.reply("❌ Rôle introuvable.", mention_author=False, delete_after=5)
         return
     if isinstance(error, commands.BadArgument):
-        await ctx.reply(f"❌ Argument invalide. Vérifie la syntaxe avec `{PREFIX}help`.", mention_author=False, delete_after=5)
+        await ctx.reply(f"❌ Argument invalide.", mention_author=False, delete_after=5)
         return
     print(f"[Erreur] {type(error).__name__}: {error}")
 
